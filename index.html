@@ -26,7 +26,7 @@
     100% { background-position: 0% 50%; }
   }
 
-  /* ---------- Voice login card ---------- */
+  /* ---------- Fingerprint login card ---------- */
   .card {
     width: 380px;
     background: #1a222c;
@@ -103,19 +103,45 @@
   .status.ok { background: rgba(74,222,128,0.12); color: #4ade80; }
   .status.err { background: rgba(239,68,68,0.12); color: #f87171; }
   .status.info { background: rgba(201,155,74,0.12); color: #c99b4a; }
-  .waveform {
-    height: 40px;
+  .scanner {
+    position: relative;
+    height: 120px;
     background: #12181f;
     border: 1px solid rgba(231,226,214,0.1);
-    border-radius: 8px;
+    border-radius: 10px;
     margin-bottom: 16px;
     display: flex;
     align-items: center;
-    gap: 2px;
-    padding: 0 8px;
+    justify-content: center;
     overflow: hidden;
   }
-  .waveform div { width: 3px; background: #c99b4a; border-radius: 2px; min-height: 2px; }
+  .fingerprint-icon {
+    width: 64px;
+    height: 64px;
+    color: #4a4536;
+    transition: color 0.25s;
+  }
+  .scanner.scanning .fingerprint-icon { color: #c99b4a; }
+  .scanner.ok .fingerprint-icon { color: #4ade80; }
+  .scanner.err .fingerprint-icon { color: #f87171; }
+  .scan-sweep {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 3px;
+    top: 20%;
+    background: linear-gradient(90deg, transparent, #c99b4a, transparent);
+    opacity: 0;
+  }
+  .scanner.scanning .scan-sweep {
+    opacity: 1;
+    animation: sweep 1.1s ease-in-out infinite;
+  }
+  @keyframes sweep {
+    0%   { top: 15%; }
+    50%  { top: 80%; }
+    100% { top: 15%; }
+  }
   .tag {
     display: inline-block;
     font-family: 'IBM Plex Mono', monospace;
@@ -259,20 +285,31 @@
 <div class="card" id="loginCard">
   <div class="locked-badge" id="badge">🔒</div>
   <h1>Secure Login</h1>
-  <div class="sub">Username is fixed. Password is your voice.</div>
+  <div class="sub">Username is fixed. Password is your fingerprint.</div>
 
   <label>Username</label>
   <input type="text" value="admin" disabled>
 
-  <label>Voice Password <span class="tag" id="enrollTag">not set</span></label>
-  <div class="waveform" id="waveform"></div>
+  <label>Fingerprint <span class="tag" id="enrollTag">not set</span></label>
+
+  <div class="scanner" id="scanner">
+    <svg class="fingerprint-icon" id="fpIcon" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round">
+      <path d="M50 20 C30 20 22 35 22 50 C22 68 30 78 34 84"/>
+      <path d="M50 14 C68 14 80 30 80 50 C80 62 76 72 70 80"/>
+      <path d="M50 28 C38 28 32 38 32 50 C32 62 37 70 42 76"/>
+      <path d="M50 36 C44 36 40 42 40 50 C40 58 43 64 48 68"/>
+      <path d="M62 26 C70 34 74 42 74 52 C74 62 70 70 64 76"/>
+      <path d="M50 44 C48 45 48 48 48 50 C48 55 50 58 53 60"/>
+    </svg>
+    <div class="scan-sweep" id="scanSweep"></div>
+  </div>
 
   <div class="mic-row">
-    <button class="btn-record" id="enrollBtn">🎙️ Set Voice Password</button>
+    <button class="btn-record" id="enrollBtn">👆 Set Fingerprint</button>
     <button class="btn-record" id="verifyBtn" disabled>🔓 Unlock</button>
   </div>
 
-  <div class="status info" id="status">Set your voice password first.</div>
+  <div class="status info" id="status">Set your fingerprint first.</div>
 </div>
 
 <div class="page" id="hubScreen">
@@ -313,230 +350,119 @@
 
 <script>
 /* =====================================================================
-   Voice biometric login
+   Fingerprint login (WebAuthn platform authenticator — Touch ID,
+   Windows Hello, Android fingerprint, etc.)
+
+   This delegates the actual biometric match to the device's OS/secure
+   hardware via the Web Authentication API. The page never sees the
+   fingerprint itself — it only gets a pass/fail from the platform
+   authenticator, which is how real fingerprint auth works everywhere
+   (browsers never expose raw biometric data to page JS).
    ===================================================================== */
 const enrollBtn = document.getElementById('enrollBtn');
 const verifyBtn = document.getElementById('verifyBtn');
 const statusEl = document.getElementById('status');
-const waveformEl = document.getElementById('waveform');
+const scannerEl = document.getElementById('scanner');
 const enrollTag = document.getElementById('enrollTag');
 const badge = document.getElementById('badge');
 const loginCard = document.getElementById('loginCard');
 const hubScreen = document.getElementById('hubScreen');
 
-let enrolledPrint = null;
-let audioContext = null;
-let attemptCount = 0;
+let credentialId = null; // raw ArrayBuffer of the enrolled credential's id
 
 function setStatus(msg, type) {
   statusEl.textContent = msg;
   statusEl.className = 'status ' + (type || 'info');
 }
 
-function drawWaveform(samples) {
-  waveformEl.innerHTML = '';
-  const step = Math.max(1, Math.floor(samples.length / 60));
-  for (let i = 0; i < samples.length; i += step) {
-    const bar = document.createElement('div');
-    const h = Math.max(2, Math.abs(samples[i]) * 40);
-    bar.style.height = h + 'px';
-    waveformEl.appendChild(bar);
-  }
+function setScannerState(state) {
+  scannerEl.classList.remove('scanning', 'ok', 'err');
+  if (state) scannerEl.classList.add(state);
 }
 
-// Record audio and extract a simple "voiceprint": an energy-envelope,
-// zero-crossing-rate, and pitch feature vector.
-async function recordAndExtract(durationMs = 2500) {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  audioContext = audioContext || new (window.AudioContext || window.webkitAudioContext)();
-  const source = audioContext.createMediaStreamSource(stream);
-  const processor = audioContext.createScriptProcessor(2048, 1, 1);
-
-  const chunks = [];
-  source.connect(processor);
-  processor.connect(audioContext.destination);
-
-  processor.onaudioprocess = (e) => {
-    const input = e.inputBuffer.getChannelData(0);
-    chunks.push(new Float32Array(input));
-  };
-
-  await new Promise((resolve) => setTimeout(resolve, durationMs));
-
-  processor.disconnect();
-  source.disconnect();
-  stream.getTracks().forEach(t => t.stop());
-
-  let all = new Float32Array(chunks.reduce((a, c) => a + c.length, 0));
-  let offset = 0;
-  for (const c of chunks) { all.set(c, offset); offset += c.length; }
-
-  drawWaveform(all);
-
-  // Trim leading/trailing silence so the fingerprint focuses on
-  // actual speech, not dead air.
-  const SILENCE_THRESHOLD = 0.02;
-  let startIdx = 0, endIdx = all.length - 1;
-  for (let i = 0; i < all.length; i++) {
-    if (Math.abs(all[i]) > SILENCE_THRESHOLD) { startIdx = i; break; }
-  }
-  for (let i = all.length - 1; i >= 0; i--) {
-    if (Math.abs(all[i]) > SILENCE_THRESHOLD) { endIdx = i; break; }
-  }
-  if (endIdx <= startIdx) { startIdx = 0; endIdx = all.length - 1; }
-  const trimmed = all.slice(startIdx, endIdx + 1);
-
-  const N_FRAMES = 24;
-  const frameSize = Math.floor(trimmed.length / N_FRAMES) || 1;
-  const energy = [];
-  const zcr = [];
-  const pitch = [];
-  const sampleRate = audioContext.sampleRate;
-
-  // Autocorrelation-based pitch detection for a single frame.
-  function detectPitch(frame, sr) {
-    const minFreq = 75;
-    const maxFreq = 400;
-    const minLag = Math.floor(sr / maxFreq);
-    const maxLag = Math.floor(sr / minFreq);
-
-    let rms = 0;
-    for (let i = 0; i < frame.length; i++) rms += frame[i] * frame[i];
-    rms = Math.sqrt(rms / frame.length);
-    if (rms < 0.01) return 0;
-
-    let bestLag = -1;
-    let bestCorr = 0;
-    for (let lag = minLag; lag <= maxLag && lag < frame.length; lag++) {
-      let corr = 0;
-      for (let i = 0; i < frame.length - lag; i++) {
-        corr += frame[i] * frame[i + lag];
-      }
-      if (corr > bestCorr) {
-        bestCorr = corr;
-        bestLag = lag;
-      }
-    }
-    if (bestLag <= 0) return 0;
-    return sr / bestLag;
-  }
-
-  for (let f = 0; f < N_FRAMES; f++) {
-    const start = f * frameSize;
-    const end = Math.min(start + frameSize, trimmed.length);
-    const frame = trimmed.slice(start, end);
-
-    let sumSq = 0, crossings = 0;
-    for (let i = 0; i < frame.length; i++) {
-      sumSq += frame[i] * frame[i];
-      if (i > 0 && ((frame[i - 1] < 0 && frame[i] >= 0) || (frame[i - 1] >= 0 && frame[i] < 0))) {
-        crossings++;
-      }
-    }
-    const frameLen = Math.max(1, frame.length);
-    energy.push(Math.sqrt(sumSq / frameLen));
-    zcr.push(crossings / frameLen);
-    pitch.push(detectPitch(frame, sampleRate));
-  }
-
-  const norm = (arr) => {
-    const max = Math.max(...arr, 1e-6);
-    return arr.map(v => v / max);
-  };
-
-  // Pitch is normalized against a fixed vocal range (not per-recording
-  // max) so it reflects actual Hz differences between takes.
-  const pitchNorm = pitch.map(p => p / 400);
-
-  // Average fundamental frequency across voiced frames only. This is
-  // the most speaker-specific number we can extract here — two
-  // different people's *envelope shapes* often look similar (speech
-  // rhythm is speech rhythm), but their average pitch is usually not.
-  const voiced = pitch.filter(p => p > 0);
-  const meanPitchHz = voiced.length ? voiced.reduce((a, b) => a + b, 0) / voiced.length : 0;
-
-  return { energy: norm(energy), zcr: norm(zcr), pitch: pitchNorm, meanPitchHz };
+function randomBytes(len) {
+  return crypto.getRandomValues(new Uint8Array(len));
 }
 
-function compareFingerprints(a, b) {
-  const cosSim = (x, y) => {
-    let dot = 0, magX = 0, magY = 0;
-    for (let i = 0; i < x.length; i++) {
-      dot += x[i] * y[i];
-      magX += x[i] * x[i];
-      magY += y[i] * y[i];
-    }
-    return dot / (Math.sqrt(magX) * Math.sqrt(magY) + 1e-9);
-  };
-  const energyScore = cosSim(a.energy, b.energy);
-  const zcrScore = cosSim(a.zcr, b.zcr);
-  const pitchScore = cosSim(a.pitch, b.pitch);
-
-  // If either recording had no detectable voiced speech, it can't be
-  // verified — reject rather than falling back to shape-only scoring.
-  if (!a.meanPitchHz || !b.meanPitchHz) return 0;
-
-  // Hard gate on absolute average pitch: different speakers'
-  // envelope shapes can look deceptively similar, but their average
-  // pitch rarely lines up closely. A relative difference beyond ~12%
-  // is treated as a different voice outright.
-  const pitchDiffRatio = Math.abs(a.meanPitchHz - b.meanPitchHz) / Math.max(a.meanPitchHz, b.meanPitchHz);
-  const pitchCloseness = Math.max(0, 1 - pitchDiffRatio / 0.12);
-  if (pitchCloseness <= 0) return 0;
-
-  const shapeScore = pitchScore * 0.55 + energyScore * 0.3 + zcrScore * 0.15;
-  return pitchCloseness * 0.65 + shapeScore * 0.35;
+function webAuthnSupported() {
+  return !!(window.PublicKeyCredential && navigator.credentials);
 }
 
 enrollBtn.addEventListener('click', async () => {
+  if (!webAuthnSupported()) {
+    setStatus('This browser/environment does not expose fingerprint auth (WebAuthn) to the page.', 'err');
+    return;
+  }
   try {
-    enrollBtn.classList.add('recording');
-    enrollBtn.textContent = '🔴 Listening...';
-    setStatus('Say your passphrase now (2.5s recording)...', 'info');
+    setScannerState('scanning');
+    enrollBtn.disabled = true;
+    setStatus('Follow your device prompt to scan your fingerprint...', 'info');
 
-    enrolledPrint = await recordAndExtract();
-    attemptCount = 0;
+    const credential = await navigator.credentials.create({
+      publicKey: {
+        challenge: randomBytes(32),
+        rp: { name: 'Designs Act, 2000 — Secure Search' },
+        user: {
+          id: randomBytes(16),
+          name: 'admin',
+          displayName: 'admin'
+        },
+        pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'required'
+        },
+        timeout: 60000,
+        attestation: 'none'
+      }
+    });
 
-    enrollBtn.classList.remove('recording');
-    enrollBtn.textContent = '🎙️ Reset Voice Password';
-    enrollTag.textContent = 'password set ✓';
+    credentialId = credential.rawId;
+
+    setScannerState('ok');
+    enrollBtn.disabled = false;
+    enrollBtn.textContent = '👆 Reset Fingerprint';
+    enrollTag.textContent = 'fingerprint set ✓';
     verifyBtn.disabled = false;
-    setStatus('Voice password set. Click Unlock and say it again to log in.', 'ok');
+    setStatus('Fingerprint set. Click Unlock and scan again to log in.', 'ok');
   } catch (err) {
-    enrollBtn.classList.remove('recording');
-    enrollBtn.textContent = '🎙️ Set Voice Password';
-    setStatus('Microphone access failed: ' + err.message, 'err');
+    setScannerState('err');
+    enrollBtn.disabled = false;
+    setStatus('Fingerprint enrollment failed: ' + err.message, 'err');
   }
 });
 
 verifyBtn.addEventListener('click', async () => {
+  if (!credentialId) return;
   try {
-    verifyBtn.classList.add('recording');
-    verifyBtn.textContent = '🔴 Listening...';
-    setStatus('Say your voice password to unlock...', 'info');
+    setScannerState('scanning');
+    verifyBtn.disabled = true;
+    setStatus('Follow your device prompt to scan your fingerprint...', 'info');
 
-    const attemptPrint = await recordAndExtract();
-    const similarity = compareFingerprints(enrolledPrint, attemptPrint);
+    // navigator.credentials.get() only resolves if the platform
+    // authenticator itself confirms the fingerprint matches the
+    // credential created above — there is no score to tune here,
+    // the OS does the actual biometric comparison.
+    await navigator.credentials.get({
+      publicKey: {
+        challenge: randomBytes(32),
+        allowCredentials: [{ type: 'public-key', id: credentialId }],
+        userVerification: 'required',
+        timeout: 60000
+      }
+    });
 
-    verifyBtn.classList.remove('recording');
-    verifyBtn.textContent = '🔓 Unlock';
-
-    const THRESHOLD = 0.75; // tightened: absolute pitch match now dominates the score
-    if (similarity >= THRESHOLD) {
-      attemptCount = 0;
-      setStatus(`Welcome, admin. Login successful (score ${similarity.toFixed(2)}).`, 'ok');
-      badge.textContent = '🔓';
-      loginCard.style.display = 'none';
-      hubScreen.style.display = 'block';
-    } else {
-      attemptCount++;
-      setStatus(`Voice did not match (score ${similarity.toFixed(2)}). Click Unlock and say it again — attempt ${attemptCount}.`, 'err');
-      badge.textContent = '🔒';
-    }
+    setScannerState('ok');
+    verifyBtn.disabled = false;
+    setStatus('Welcome, admin. Login successful.', 'ok');
+    badge.textContent = '🔓';
+    loginCard.style.display = 'none';
+    hubScreen.style.display = 'block';
   } catch (err) {
-    verifyBtn.classList.remove('recording');
-    verifyBtn.textContent = '🔓 Unlock';
-    setStatus('Microphone access failed: ' + err.message, 'err');
+    setScannerState('err');
+    verifyBtn.disabled = false;
+    badge.textContent = '🔒';
+    setStatus('Fingerprint did not match or was cancelled: ' + err.message, 'err');
   }
 });
 
@@ -544,7 +470,8 @@ document.getElementById('lockBtn').addEventListener('click', () => {
   hubScreen.style.display = 'none';
   loginCard.style.display = 'block';
   badge.textContent = '🔒';
-  setStatus('System locked. Say your voice password to unlock.', 'info');
+  setScannerState(null);
+  setStatus('System locked. Scan your fingerprint to unlock.', 'info');
 });
 
 /* =====================================================================
