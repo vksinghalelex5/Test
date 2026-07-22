@@ -315,8 +315,8 @@
   <label>Fingerprint <span class="tag" id="enrollTag">not set</span></label>
 
   <div class="scanner" id="scanner">
-    <div class="progress-ring" id="progressRing"></div>
-    <div class="sensor-pad" id="sensorPad" title="Press and hold to scan">
+    <div class="progress-ring" id="progressRing" style="--progress:0"></div>
+    <div class="sensor-pad" id="sensorPad" title="Tap Set Fingerprint or Unlock to invoke your device sensor">
       <svg class="fingerprint-icon" id="fpIcon" viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round">
         <path d="M50 20 C30 20 22 35 22 50 C22 68 30 78 34 84"/>
         <path d="M50 14 C68 14 80 30 80 50 C80 62 76 72 70 80"/>
@@ -327,14 +327,14 @@
       </svg>
     </div>
   </div>
-  <div class="scanner-hint" id="scannerHint">Press and hold the sensor above to scan</div>
+  <div class="scanner-hint" id="scannerHint">This will invoke your device's real biometric prompt</div>
 
   <div class="mic-row">
     <button class="btn-record" id="enrollBtn" type="button">Set Fingerprint</button>
     <button class="btn-record" id="verifyBtn" type="button" disabled>Unlock</button>
   </div>
 
-  <div class="status info" id="status">Click "Set Fingerprint," then press and hold the sensor.</div>
+  <div class="status info" id="status">Checking device support…</div>
 </div>
 
 <div class="page" id="hubScreen">
@@ -375,51 +375,49 @@
 
 <script>
 /* =====================================================================
-   Fingerprint login — press-and-hold sensor pad
+   Fingerprint login — REAL biometric authentication via WebAuthn
 
-   Real device fingerprint sensors aren't reachable from page JS: the
-   only browser API that touches platform biometrics (WebAuthn) lets
-   the OS accept a PIN/pattern as an equally valid substitute, and a
-   website has no way to turn that off. So this sensor is fully
-   self-contained instead — no PIN/password fallback exists here,
-   only this gesture. Press and hold the pad; while held it samples
-   pointer pressure and position at intervals to build a print vector
-   (hold duration, average pressure, and steadiness/jitter). That
-   vector is what's compared on unlock. This is a simulated scanner
-   for the demo, not real biometric hardware security.
+   This calls navigator.credentials.create()/.get() with
+   authenticatorAttachment: "platform", which invokes your device's
+   actual OS-level biometric sensor (Android fingerprint, Touch ID,
+   Windows Hello) — it is not a page-drawn simulation.
 
-   IMPORTANT FIX: the earlier version's <input type="text" value="admin">
-   was being recognized by some mobile browsers as a login-form field,
-   which triggered the phone's own saved-password / biometric-unlock
-   autofill prompt (that's the OS/browser stepping in, not this page).
-   This version disables autocomplete and password-manager heuristics
-   on every input (autocomplete="off", data-lpignore, non-guessable
-   "name" attributes, no <form> wrapper, button type="button" on every
-   button so nothing can act as a submit control) so the browser has
-   nothing to attach a saved credential to. The only way to unlock is
-   the press-and-hold gesture on the sensor pad below.
+   Two hard constraints, both enforced by the browser/OS and not
+   something any webpage's JavaScript can change:
+   1. WebAuthn only runs in a "secure context" — HTTPS or localhost.
+      Opening this file directly as file://... on a phone will make
+      isUserVerifyingPlatformAuthenticatorAvailable() resolve false,
+      or the calls will simply throw. Host this file (even a free
+      static host) to use it for real.
+   2. When the OS shows its native biometric prompt, whether it also
+      offers a PIN/pattern fallback is controlled entirely by your
+      device's own security settings — not by this page. There is no
+      WebAuthn option a website can set to force "fingerprint only,
+      no fallback ever." If your phone is configured to allow PIN as
+      a fallback for biometric prompts generally, it will still be
+      offered here.
+
+   Because there is no backend server in this single-file demo, we
+   cannot cryptographically verify the signed assertion the way a
+   production system would (that check normally happens server-side
+   against a stored public key + a fresh random challenge). Instead
+   we treat a successful, non-cancelled WebAuthn ceremony as proof
+   that your device's real sensor accepted you — which is fine for a
+   personal single-device tool, but isn't a substitute for a proper
+   client-server WebAuthn flow if this ever needs to resist a
+   determined attacker.
    ===================================================================== */
 const enrollBtn = document.getElementById('enrollBtn');
 const verifyBtn = document.getElementById('verifyBtn');
 const statusEl = document.getElementById('status');
 const scannerEl = document.getElementById('scanner');
-const sensorPad = document.getElementById('sensorPad');
-const progressRing = document.getElementById('progressRing');
 const scannerHint = document.getElementById('scannerHint');
 const enrollTag = document.getElementById('enrollTag');
 const badge = document.getElementById('badge');
 const loginCard = document.getElementById('loginCard');
 const hubScreen = document.getElementById('hubScreen');
 
-const MIN_HOLD_MS = 600;
-const MAX_HOLD_MS = 2200;
-
-let enrolledPrint = null;
-let mode = null;        // 'enroll' | 'verify' | null
-let holding = false;
-let holdStart = 0;
-let samples = [];
-let rafId = null;
+let storedCredentialRawId = null; // ArrayBuffer, kept in memory only (not persisted)
 
 function setStatus(msg, type) {
   statusEl.textContent = msg;
@@ -431,139 +429,116 @@ function setScannerState(state) {
   if (state) scannerEl.classList.add(state);
 }
 
-function setProgress(pct) {
-  progressRing.style.setProperty('--progress', Math.max(0, Math.min(100, pct)));
+function bufToBase64url(buf) {
+  const bytes = new Uint8Array(buf);
+  let str = '';
+  for (const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-function beginHold(e) {
-  if (mode === null) return;
-  e.preventDefault();
-  holding = true;
-  holdStart = performance.now();
-  samples = [];
+async function checkSupport() {
+  if (!window.isSecureContext) {
+    setStatus('This page is not on HTTPS/localhost, so the browser blocks real biometric access. Host this file over HTTPS to use a real fingerprint sensor.', 'err');
+    enrollBtn.disabled = true;
+    return;
+  }
+  if (!window.PublicKeyCredential) {
+    setStatus('This browser does not support WebAuthn/biometric login.', 'err');
+    enrollBtn.disabled = true;
+    return;
+  }
+  try {
+    const available = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+    if (!available) {
+      setStatus('No platform fingerprint/biometric sensor was detected on this device.', 'err');
+      enrollBtn.disabled = true;
+      return;
+    }
+    setStatus('Ready. Tap "Set Fingerprint" to register your device sensor.', 'info');
+  } catch (err) {
+    setStatus('Could not check biometric availability: ' + err.message, 'err');
+    enrollBtn.disabled = true;
+  }
+}
+
+enrollBtn.addEventListener('click', async () => {
   setScannerState('scanning');
-  scannerHint.textContent = 'Hold still...';
-  sensorPad.setPointerCapture(e.pointerId);
-  sample(e);
-  rafId = requestAnimationFrame(tick);
-}
-
-function sample(e) {
-  const rect = sensorPad.getBoundingClientRect();
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-  samples.push({
-    t: performance.now(),
-    dx: e.clientX - cx,
-    dy: e.clientY - cy,
-    p: e.pressure && e.pressure > 0 ? e.pressure : 0.5
-  });
-}
-
-function tick() {
-  if (!holding) return;
-  const elapsed = performance.now() - holdStart;
-  setProgress((elapsed / MAX_HOLD_MS) * 100);
-  if (elapsed >= MAX_HOLD_MS) {
-    finishHold();
-    return;
-  }
-  rafId = requestAnimationFrame(tick);
-}
-
-function extractPrint() {
-  const duration = performance.now() - holdStart;
-  const pressures = samples.map(s => s.p);
-  const radii = samples.map(s => Math.sqrt(s.dx * s.dx + s.dy * s.dy));
-
-  const mean = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-  const meanPressure = mean(pressures);
-  const meanRadius = mean(radii);
-  const radiusStd = Math.sqrt(mean(radii.map(r => (r - meanRadius) ** 2)));
-
-  return { duration, meanPressure, meanRadius, radiusStd };
-}
-
-function comparePrints(a, b) {
-  const closeness = (diff, tolerance) => Math.max(0, 1 - Math.abs(diff) / tolerance);
-  const durationScore = closeness(a.duration - b.duration, 900);
-  const pressureScore = closeness(a.meanPressure - b.meanPressure, 0.35);
-  const radiusScore = closeness(a.meanRadius - b.meanRadius, 22);
-  const jitterScore = closeness(a.radiusStd - b.radiusStd, 14);
-  return durationScore * 0.3 + pressureScore * 0.25 + radiusScore * 0.25 + jitterScore * 0.2;
-}
-
-function finishHold() {
-  if (!holding) return;
-  holding = false;
-  cancelAnimationFrame(rafId);
-  const elapsed = performance.now() - holdStart;
-  setProgress(0);
-
-  if (elapsed < MIN_HOLD_MS) {
-    setScannerState('err');
-    scannerHint.textContent = 'Press and hold the sensor above to scan';
-    setStatus('Lifted too soon — hold the sensor down for about a second.', 'err');
-    setTimeout(() => setScannerState(null), 700);
-    return;
-  }
-
-  const print = extractPrint();
-
-  if (mode === 'enroll') {
-    enrolledPrint = print;
+  scannerHint.textContent = 'Follow the prompt from your device...';
+  setStatus('Waiting for your fingerprint sensor...', 'info');
+  try {
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const userId = crypto.getRandomValues(new Uint8Array(16));
+    const credential = await navigator.credentials.create({
+      publicKey: {
+        challenge,
+        rp: { name: 'Designs Act Secure Search' },
+        user: { id: userId, name: 'admin', displayName: 'admin' },
+        pubKeyCredParams: [
+          { type: 'public-key', alg: -7 },   // ES256
+          { type: 'public-key', alg: -257 }  // RS256
+        ],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'required',
+          residentKey: 'preferred'
+        },
+        timeout: 60000,
+        attestation: 'none'
+      }
+    });
+    storedCredentialRawId = credential.rawId;
     setScannerState('ok');
-    scannerHint.textContent = 'Press and hold the sensor above to scan';
-    enrollBtn.textContent = 'Reset Fingerprint';
+    scannerHint.textContent = 'Fingerprint registered with this device';
+    enrollBtn.textContent = 'Re-register Fingerprint';
     enrollTag.textContent = 'fingerprint set ✓';
     verifyBtn.disabled = false;
-    setStatus('Fingerprint set. Click Unlock, then hold the sensor again to log in.', 'ok');
-  } else if (mode === 'verify') {
-    const score = comparePrints(enrolledPrint, print);
-    const THRESHOLD = 0.6;
-    if (score >= THRESHOLD) {
-      setScannerState('ok');
-      setStatus(`Welcome, admin. Login successful (match ${(score * 100).toFixed(0)}%).`, 'ok');
-      badge.textContent = '🔓';
-      loginCard.style.display = 'none';
-      hubScreen.style.display = 'block';
-    } else {
-      setScannerState('err');
-      scannerHint.textContent = 'Press and hold the sensor above to scan';
-      setStatus(`Fingerprint did not match (${(score * 100).toFixed(0)}%). Try again.`, 'err');
-    }
+    setStatus('Fingerprint registered. Tap Unlock and scan again to log in.', 'ok');
+  } catch (err) {
+    setScannerState('err');
+    scannerHint.textContent = 'This will invoke your device\\'s real biometric prompt';
+    setStatus('Registration cancelled or failed: ' + err.message, 'err');
   }
-  mode = null;
-}
-
-sensorPad.addEventListener('pointerdown', beginHold);
-sensorPad.addEventListener('pointermove', (e) => { if (holding) sample(e); });
-sensorPad.addEventListener('pointerup', finishHold);
-sensorPad.addEventListener('pointercancel', finishHold);
-
-enrollBtn.addEventListener('click', () => {
-  mode = 'enroll';
-  setScannerState(null);
-  scannerHint.textContent = 'Press and hold the sensor above to scan';
-  setStatus('Press and hold the sensor to set your fingerprint.', 'info');
 });
 
-verifyBtn.addEventListener('click', () => {
-  mode = 'verify';
-  setScannerState(null);
-  scannerHint.textContent = 'Press and hold the sensor above to scan';
-  setStatus('Press and hold the sensor to unlock.', 'info');
+verifyBtn.addEventListener('click', async () => {
+  setScannerState('scanning');
+  scannerHint.textContent = 'Follow the prompt from your device...';
+  setStatus('Waiting for your fingerprint sensor...', 'info');
+  try {
+    const challenge = crypto.getRandomValues(new Uint8Array(32));
+    const allowCredentials = storedCredentialRawId
+      ? [{ id: storedCredentialRawId, type: 'public-key' }]
+      : [];
+    await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        allowCredentials,
+        userVerification: 'required',
+        timeout: 60000
+      }
+    });
+    setScannerState('ok');
+    setStatus('Welcome, admin. Fingerprint verified.', 'ok');
+    badge.textContent = '🔓';
+    loginCard.style.display = 'none';
+    hubScreen.style.display = 'block';
+  } catch (err) {
+    setScannerState('err');
+    scannerHint.textContent = 'This will invoke your device\\'s real biometric prompt';
+    setStatus('Fingerprint check cancelled or failed: ' + err.message, 'err');
+  }
 });
 
 document.getElementById('lockBtn').addEventListener('click', () => {
   hubScreen.style.display = 'none';
   loginCard.style.display = 'block';
   badge.textContent = '🔒';
-  mode = null;
   setScannerState(null);
-  scannerHint.textContent = 'Press and hold the sensor above to scan';
-  setStatus('System locked. Click Unlock, then hold the sensor to scan.', 'info');
+  scannerHint.textContent = 'This will invoke your device\\'s real biometric prompt';
+  setStatus(storedCredentialRawId ? 'System locked. Tap Unlock to scan again.' : 'System locked.', 'info');
 });
+
+checkSupport();
 
 /* =====================================================================
    Designs Act, 2000 — statutory search hub
