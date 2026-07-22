@@ -308,7 +308,9 @@
   <div class="sub">Username is fixed. Password is your fingerprint.</div>
 
   <label>Username</label>
-  <input type="text" value="admin" disabled>
+  <input type="text" value="admin" disabled
+         autocomplete="off" data-lpignore="true" data-form-type="other"
+         name="x-fp-username-noauto">
 
   <label>Fingerprint <span class="tag" id="enrollTag">not set</span></label>
 
@@ -328,8 +330,8 @@
   <div class="scanner-hint" id="scannerHint">Press and hold the sensor above to scan</div>
 
   <div class="mic-row">
-    <button class="btn-record" id="enrollBtn">Set Fingerprint</button>
-    <button class="btn-record" id="verifyBtn" disabled>Unlock</button>
+    <button class="btn-record" id="enrollBtn" type="button">Set Fingerprint</button>
+    <button class="btn-record" id="verifyBtn" type="button" disabled>Unlock</button>
   </div>
 
   <div class="status info" id="status">Click "Set Fingerprint," then press and hold the sensor.</div>
@@ -337,7 +339,7 @@
 
 <div class="page" id="hubScreen">
   <header>
-    <button class="btn-lock" id="lockBtn">Lock system</button>
+    <button class="btn-lock" id="lockBtn" type="button">Lock system</button>
     <div class="eyebrow">Statutory Reference · India</div>
     <h1>The Designs Act, 2000</h1>
     <div class="tagline">Search any section by number or by concept — each result includes a plain-language summary and a worked example.</div>
@@ -347,18 +349,18 @@
     <div class="search-row">
       <div class="field">
         <label for="sectionInput">Search by section number</label>
-        <input type="text" id="sectionInput" placeholder="e.g. 4, 22, 2(a)">
+        <input type="text" id="sectionInput" placeholder="e.g. 4, 22, 2(a)" autocomplete="off" data-lpignore="true">
       </div>
       <div class="divider-or">OR</div>
       <div class="field">
         <label for="keywordInput">Search by keyword</label>
-        <input type="text" id="keywordInput" placeholder="e.g. piracy, cancellation">
+        <input type="text" id="keywordInput" placeholder="e.g. piracy, cancellation" autocomplete="off" data-lpignore="true">
       </div>
     </div>
     <div class="action-row">
-      <button class="btn-search" id="executeBtn">Search</button>
-      <button class="btn-clear" id="clearBtn">Clear</button>
-      <button class="btn-browse" id="browseBtn">Browse all 48 sections</button>
+      <button class="btn-search" id="executeBtn" type="button">Search</button>
+      <button class="btn-clear" id="clearBtn" type="button">Clear</button>
+      <button class="btn-browse" id="browseBtn" type="button">Browse all 48 sections</button>
     </div>
   </div>
 
@@ -385,6 +387,17 @@
    (hold duration, average pressure, and steadiness/jitter). That
    vector is what's compared on unlock. This is a simulated scanner
    for the demo, not real biometric hardware security.
+
+   IMPORTANT FIX: the earlier version's <input type="text" value="admin">
+   was being recognized by some mobile browsers as a login-form field,
+   which triggered the phone's own saved-password / biometric-unlock
+   autofill prompt (that's the OS/browser stepping in, not this page).
+   This version disables autocomplete and password-manager heuristics
+   on every input (autocomplete="off", data-lpignore, non-guessable
+   "name" attributes, no <form> wrapper, button type="button" on every
+   button so nothing can act as a submit control) so the browser has
+   nothing to attach a saved credential to. The only way to unlock is
+   the press-and-hold gesture on the sensor pad below.
    ===================================================================== */
 const enrollBtn = document.getElementById('enrollBtn');
 const verifyBtn = document.getElementById('verifyBtn');
