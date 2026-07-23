@@ -467,7 +467,7 @@ async function checkSupport() {
   }
 
   if (!available) {
-    setStatus('No platform fingerprint/biometric sensor was detected on this device (or none is enrolled in your phone\\'s own settings yet). Enroll a fingerprint in your phone\\'s system settings first, then reload this page.', 'err');
+    setStatus('No platform fingerprint/biometric sensor was detected on this device (or none is enrolled in your device system settings yet). Enroll a fingerprint in your system settings first, then reload this page.', 'err');
     return;
   }
 
@@ -518,7 +518,7 @@ enrollBtn.addEventListener('click', async () => {
     setStatus('Fingerprint registered. Tap Unlock and scan again to log in.', 'ok');
   } catch (err) {
     setScannerState('err');
-    scannerHint.textContent = 'This will invoke your device\\'s real biometric prompt';
+    scannerHint.textContent = 'This will invoke your device real biometric prompt';
     setStatus('Registration cancelled or failed: ' + err.message, 'err');
   }
 });
@@ -547,7 +547,7 @@ verifyBtn.addEventListener('click', async () => {
     hubScreen.style.display = 'block';
   } catch (err) {
     setScannerState('err');
-    scannerHint.textContent = 'This will invoke your device\\'s real biometric prompt';
+    scannerHint.textContent = 'This will invoke your device real biometric prompt';
     setStatus('Fingerprint check cancelled or failed: ' + err.message, 'err');
   }
 });
@@ -557,7 +557,7 @@ document.getElementById('lockBtn').addEventListener('click', () => {
   loginCard.style.display = 'block';
   badge.textContent = '🔒';
   setScannerState(null);
-  scannerHint.textContent = 'This will invoke your device\\'s real biometric prompt';
+  scannerHint.textContent = 'This will invoke your device real biometric prompt';
   setStatus(storedCredentialRawId ? 'System locked. Tap Unlock to scan again.' : 'System locked.', 'info');
 });
 
