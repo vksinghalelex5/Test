@@ -437,28 +437,51 @@ function bufToBase64url(buf) {
 }
 
 async function checkSupport() {
+  enrollBtn.disabled = true;
+
+  // Step 1: secure context (HTTPS or localhost)
   if (!window.isSecureContext) {
-    setStatus('This page is not on HTTPS/localhost, so the browser blocks real biometric access. Host this file over HTTPS to use a real fingerprint sensor.', 'err');
-    enrollBtn.disabled = true;
+    setStatus('Blocked: this page must be served over HTTPS (or localhost) for the browser to allow real biometric access. It will not work opened as a local file.', 'err');
     return;
   }
-  if (!window.PublicKeyCredential) {
-    setStatus('This browser does not support WebAuthn/biometric login.', 'err');
-    enrollBtn.disabled = true;
+
+  // Step 2: WebAuthn API present at all
+  if (!window.PublicKeyCredential || typeof navigator.credentials === 'undefined') {
+    setStatus('Blocked: this browser/app does not implement WebAuthn. If you are inside an in-app browser (Instagram, Facebook, TikTok, etc.), open this link in Chrome/Safari directly instead.', 'err');
     return;
   }
+
+  // Step 3: does this specific device expose a platform authenticator (fingerprint/Face/Touch ID/Windows Hello)?
+  if (typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable !== 'function') {
+    setStatus('Blocked: this browser cannot query for a platform biometric sensor. Try updating your browser.', 'err');
+    return;
+  }
+
+  let available = false;
   try {
-    const available = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
-    if (!available) {
-      setStatus('No platform fingerprint/biometric sensor was detected on this device.', 'err');
-      enrollBtn.disabled = true;
-      return;
-    }
-    setStatus('Ready. Tap "Set Fingerprint" to register your device sensor.', 'info');
+    available = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
   } catch (err) {
-    setStatus('Could not check biometric availability: ' + err.message, 'err');
-    enrollBtn.disabled = true;
+    console.error('WebAuthn availability check threw:', err);
+    setStatus('Could not query the biometric sensor: ' + err.name + ' — ' + err.message, 'err');
+    return;
   }
+
+  if (!available) {
+    setStatus('No platform fingerprint/biometric sensor was detected on this device (or none is enrolled in your phone\\'s own settings yet). Enroll a fingerprint in your phone\\'s system settings first, then reload this page.', 'err');
+    return;
+  }
+
+  // Optional extra signal (not required, but useful diagnostics on some browsers)
+  let conditionalNote = '';
+  try {
+    if (typeof PublicKeyCredential.isConditionalMediationAvailable === 'function') {
+      const conditional = await PublicKeyCredential.isConditionalMediationAvailable();
+      conditionalNote = conditional ? '' : '';
+    }
+  } catch (_) { /* non-critical, ignore */ }
+
+  enrollBtn.disabled = false;
+  setStatus('Device biometric sensor detected. Tap "Set Fingerprint" to register it.' + conditionalNote, 'ok');
 }
 
 enrollBtn.addEventListener('click', async () => {
